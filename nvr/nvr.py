@@ -88,7 +88,7 @@ class AlarmFileSystem:
     def putAlarms(self, alarms):
         writeCsv(alarms.alarms, self.filename)
 
-    def putImages(self, alarms, alarmServer):
+    def putAlarmImages(self, alarms, alarmServer):
         logging.info('putImage')
         if not os.path.exists(self.imageDir):
             os.makedirs(self.imageDir)
@@ -185,6 +185,36 @@ class AlarmServer:
         logging.debug(pf(mavpos))
         return mavpos
 
+    def getMavposXml ( self, time ):
+        ## http://54.79.61.179/nvrs/nvr_server?getimage&camera=flycam1&time=2014-07-11%2000-15-51-670&mavposition
+        payload = { 'camera':self.camera, 'time':time, 'mavposition':True }
+        r = requests.get(self.svr + '?getimage', auth=('admin', 'admin'), params=payload)
+        return r.text
+
+    def getTimeline ( self ):
+        #http://52.64.122.46/nvrs/nvr_server?gettimeline&camera=thunder
+        payload = { 'camera':self.camera }
+        r = requests.get(self.svr + '?gettimeline', auth=('admin', 'admin'), params=payload)
+        tree = et.ElementTree(et.fromstring(r.text))
+        logging.debug(r.text)
+        firstTag = tree.find('CameraNVRData/CameraNVRSetting/NewFirstSavedCamImageDateTimeForNVR').text  # xpath
+        lastTag = tree.find('CameraNVRData/CameraNVRSetting/NewLastSavedCamImageDateTimeForNVR').text  # xpath
+        return (firstTag, lastTag)
+
+    def getImageList ( self, startTime, endTime ):
+        #http://10.0.0.1/nvrs/nvr_server?listfiles&camera=flycam1&time=2015-06-07 10-02-05-859&endTime=2015-06-07 10-02-06-181
+        payload = { 'camera':self.camera,
+                    'time':startTime,
+                    'endTime':endTime
+                  }
+        r = requests.get(self.svr + '?listfiles', auth=('admin', 'admin'), params=payload)
+        tree = et.ElementTree(et.fromstring(r.text))
+        #logging.debug(r.text)
+        #f = open('listfiles.txt', 'w')
+        #f.write(r.text)
+
+        return tree.getroot()        
+
     def getImage ( self, time ):
         payload = { 'camera':self.camera,
                     'time':time.replace('+', ' '),
@@ -192,7 +222,7 @@ class AlarmServer:
                     'quality':100,
                     'fullimg': True,
                     'timestamp': False,
-                    'showjoes': True
+                    'showjoes': False
                 }
         r = requests.get(self.svr + '?getimage', auth=('admin', 'admin'), params=payload)
         return Image.open(StringIO(r.content))
@@ -331,6 +361,56 @@ def copyAlarms ( source, dest, numalarms, startalarmid, minscore, minalt, number
     logging.info('done')
 
     dest.putAlarms(alarms)
-    dest.putImages(alarms, source)
+    dest.putAlarmImages(alarms, source)
     dest.putCroppeds(alarms, source)
 
+def copyImages ( source, tlog, dest, maxImages = -1 ):
+    logging.info('copyImages({},{},{},{})'.format(source, tlog, dest, maxImages))
+
+    logging.info('Read tlog.')
+
+    (firstTime,lastTime) = source.getTimeline()
+    
+    logging.debug('timeline={}-{}.done'.format(firstTime,lastTime))
+
+    imageList = source.getImageList(firstTime,lastTime)
+
+    #<Status>Succeeded</Status>
+    #<Dir><Name>/srv/disk1/flycam1/2015-06-07/0600</Name>
+    #<N>2015-06-07 10-02-05-859.jpg</N><N>2015-06-07 10-02-06-128.jpg</N>
+    #<Size>84103564</Size><AvgTimeBetweenFrames>345.350494</AvgTimeBetweenFrames><StdDevTimeBetweenFrames>1778.136841</StdDevTimeBetweenFrames><MaxDiffMS>40265</MaxDiffMS><MinDiffMS>237</MinDiffMS></Dir>
+    #<FirstFile>2015-06-07 10-02-05-859.jpg</FirstFile>
+    #<LastFile>2015-06-08 02-23-02-269.jpg</LastFile>
+    #<ListFileResult><Camera>flycam1</Camera><FilesListed>31596</FilesListed>
+    #<SizeListed>2656651866</SizeListed>
+    #<SizeListedH>2.47G (2656651866 bytes)</SizeListedH>
+    #<TotalFiles>31596</TotalFiles><FramesPerSecond>0.536827</FramesPerSecond>
+    #<Label></Label>
+    #<AvgTimeBetweenFrames>1862.780396</AvgTimeBetweenFrames>
+    #<StdDevTimeBetweenFrames>248752.906250</StdDevTimeBetweenFrames>
+    #<MaxDiffMS>44105604</MaxDiffMS><MinDiffMS>5</MinDiffMS></ListFileResult>
+    #<ResponseTime>1448</ResponseTime>
+
+    numImages = 0
+    outputDirName = r'c:\temp\out'
+    if not os.path.exists(outputDirName):
+      os.makedirs(outputDirName)
+    for dir in imageList:
+        if dir.tag == 'Dir':
+            dirName = dir.find('Name').text
+            print dirName
+            for file in dir:
+                if file.tag == 'N' and (maxImages < 0 or numImages < maxImages):
+                    filename = file.text
+                    print '  ', filename
+                    imageTime = filename.split('.')[0]
+                    img = source.getImage(imageTime)
+                    img.save(os.path.join(outputDirName, filename))
+                    mavPos = source.getMavposXml(imageTime)
+                    if mavPos:
+                      open(os.path.join(outputDirName,imageTime+'.xml'),'w').write(mavPos)
+                    numImages += 1
+                    
+    
+
+    #dest.putAlarmImages(alarms, source)
